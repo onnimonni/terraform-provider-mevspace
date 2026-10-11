@@ -11,9 +11,38 @@
     pkgs.gnupg
     pkgs.terraform-plugin-docs
     pkgs.jq
+    pkgs.yubikey-manager
   ];
 
   languages.go.enable = true;
+
+  # Sign a CI-built draft release with the YubiKey and publish it: sign-release vX.Y.Z
+  scripts.sign-release.exec = ''
+    set -euo pipefail
+    tag=''${1:?usage: sign-release vX.Y.Z}
+    fpr=0C36D59D531CA3884CFED6D32D6ADE1A7D2F2EBF
+    repo=onnimonni/terraform-provider-mevspace
+    root=$(git rev-parse --show-toplevel)
+    sums="terraform-provider-mevspace_''${tag#v}_SHA256SUMS"
+    tmp=$(mktemp -d)
+    trap 'rm -r -- "$tmp"' EXIT
+
+    gh release download "$tag" -R "$repo" -D "$tmp" --skip-existing
+    rm -f -- "$tmp/$sums.sig"
+    echo "Checking every released file against $sums..."
+    (cd "$tmp" && shasum -a 256 -c "$sums")
+
+    echo "Signing $sums with the YubiKey (touch it when it blinks)..."
+    gpg --local-user "$fpr" --detach-sign --output "$tmp/$sums.sig" "$tmp/$sums"
+
+    # Verify against the committed public key, not the local keyring.
+    gpg --dearmor < "$root/keys/signing-key.asc" > "$tmp/key.gpg"
+    gpgv --keyring "$tmp/key.gpg" "$tmp/$sums.sig" "$tmp/$sums"
+
+    gh release upload "$tag" -R "$repo" --clobber "$tmp/$sums.sig"
+    gh release edit "$tag" -R "$repo" --draft=false
+    echo "Signed and published $tag"
+  '';
 
   # Regenerate docs/ for the registry from the local build (no Terraform download).
   scripts.gen-docs.exec = ''

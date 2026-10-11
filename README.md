@@ -69,5 +69,10 @@ See `examples/`. Regenerate registry docs (`docs/`) after schema changes with `g
 
 ## Releasing
 
-Push a `vX.Y.Z` tag. The release workflow runs goreleaser, which builds the provider and the `mevspace` CLI
-and signs checksums with the GPG key from the `GPG_PRIVATE_KEY` / `PASSPHRASE` repo secrets.
+1. Push a `vX.Y.Z` tag. CI runs goreleaser and creates a **draft** release with the provider and `mevspace` CLI.
+2. Run `sign-release vX.Y.Z` (devenv). It verifies every asset against `SHA256SUMS`, signs it with the
+   YubiKey-held key (touch required), checks the signature against `keys/signing-key.asc`, uploads the
+   `.sig` and publishes the release.
+
+Signing key: NIST P-521, fingerprint `0C36 D59D 531C A388 4CFE  D6D3 2D6A DE1A 7D2F 2EBF`
+(`keys/signing-key.asc`). The private key exists only on a YubiKey; no signing secret is stored in CI.
