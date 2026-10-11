@@ -57,8 +57,16 @@ func saveConfig(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+	// OpenFile keeps the mode of an existing file; enforce 0600 before writing anything.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (c *Config) get(name string) *Context {
@@ -146,12 +154,11 @@ func handleContext(a args) error {
 		return nil
 
 	case "active":
-		if cfg.ActiveContext == "" {
+		if c := cfg.get(cfg.ActiveContext); c == nil {
 			fmt.Println("No active context")
 		} else {
-			fmt.Println(cfg.ActiveContext)
+			fmt.Printf("%s (token in %s)\n", c.Name, tokenBackend(c))
 		}
-		fmt.Printf("Token storage: %s\n", secretBackend)
 		if os.Getenv("MEVSPACE_API_TOKEN") != "" {
 			fmt.Println("(MEVSPACE_API_TOKEN is set and takes precedence)")
 		}

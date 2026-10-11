@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -33,7 +34,16 @@ func New(endpoint, token string) *Client {
 	return &Client{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		token:    token,
-		http:     &http.Client{Timeout: 60 * time.Second},
+		http: &http.Client{
+			Timeout: 60 * time.Second,
+			// The token travels in the query string, so never follow it to another host or to http.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if req.URL.Host != via[0].URL.Host || req.URL.Scheme != via[0].URL.Scheme {
+					return errors.New("refusing cross-host or scheme-changing redirect")
+				}
+				return nil
+			},
+		},
 	}
 }
 
@@ -51,7 +61,49 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
+// do performs a request. Every returned error is scrubbed of the access token.
 func (c *Client) do(ctx context.Context, method, path string, query, form url.Values) (*http.Response, []byte, error) {
+	resp, data, err := c.doRaw(ctx, method, path, query, form)
+	return resp, data, c.redact(err)
+}
+
+// redact removes the token (raw and URL-encoded) from an error, keeping APIError typed.
+func (c *Client) redact(err error) error {
+	if err == nil || c.token == "" {
+		return err
+	}
+	scrub := func(s string) string {
+		for _, t := range []string{c.token, url.QueryEscape(c.token), url.PathEscape(c.token)} {
+			s = strings.ReplaceAll(s, t, "[REDACTED]")
+		}
+		return s
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return &APIError{StatusCode: apiErr.StatusCode, Message: scrub(apiErr.Message)}
+	}
+	return errors.New(scrub(err.Error()))
+}
+
+// checkEndpoint requires https, except for loopback hosts (local testing).
+func (c *Client) checkEndpoint() error {
+	u, err := url.Parse(c.endpoint)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("invalid endpoint %q", c.endpoint)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if host := u.Hostname(); u.Scheme == "http" && (host == "localhost" || net.ParseIP(host).IsLoopback()) {
+		return nil
+	}
+	return fmt.Errorf("endpoint %q must use https", c.endpoint)
+}
+
+func (c *Client) doRaw(ctx context.Context, method, path string, query, form url.Values) (*http.Response, []byte, error) {
+	if err := c.checkEndpoint(); err != nil {
+		return nil, nil, err
+	}
 	if query == nil {
 		query = url.Values{}
 	}
@@ -211,11 +263,23 @@ func (c *Client) CreateSSHKey(ctx context.Context, label, value string) (Object,
 	if err != nil {
 		return nil, err
 	}
+	// Newest first: prefer same label + same key material, else newest with the same label
+	// (the API may normalise the value, e.g. drop the comment).
+	var sameLabel Object
 	for i := len(keys) - 1; i >= 0; i-- {
 		k := keys[i]
-		if k.String("label") == label && strings.TrimSpace(k.String("value")) == strings.TrimSpace(value) {
+		if k.String("label") != label {
+			continue
+		}
+		if KeyMaterial(k.String("value")) == KeyMaterial(value) {
 			return k, nil
 		}
+		if sameLabel == nil {
+			sameLabel = k
+		}
+	}
+	if sameLabel != nil {
+		return sameLabel, nil
 	}
 	return nil, fmt.Errorf("ssh key %q created but not found in key list", label)
 }
@@ -321,10 +385,21 @@ func (o Object) Int64(key string) int64 {
 func (o Object) Flatten() map[string]string {
 	out := make(map[string]string, len(o))
 	for k, v := range o {
-		if v == nil {
+		// _links are HAL navigation, not server data.
+		if v == nil || k == "_links" {
 			continue
 		}
 		out[k] = Stringify(v)
 	}
 	return out
+}
+
+// KeyMaterial returns the "<type> <base64>" part of an OpenSSH public key, ignoring the
+// comment and whitespace, so differently formatted copies of the same key compare equal.
+func KeyMaterial(v string) string {
+	f := strings.Fields(v)
+	if len(f) > 2 {
+		f = f[:2]
+	}
+	return strings.Join(f, " ")
 }

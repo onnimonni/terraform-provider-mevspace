@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -79,5 +80,61 @@ func TestNetworkErrorRedactsToken(t *testing.T) {
 	_, err := New("http://127.0.0.1:1", "supersecret").ListSSHKeys(context.Background())
 	if err == nil || strings.Contains(err.Error(), "supersecret") {
 		t.Fatalf("token leaked or no error: %v", err)
+	}
+}
+
+func TestRequestBuildErrorRedactsToken(t *testing.T) {
+	tok := "s3cr/t+tok"
+	_, err := New("https://bad host", tok).ListSSHKeys(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, leak := range []string{tok, url.QueryEscape(tok)} {
+		if strings.Contains(err.Error(), leak) {
+			t.Fatalf("token leaked: %v", err)
+		}
+	}
+}
+
+func TestAPIErrorStaysTypedAndRedacted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, `{"message":"no route for %s"}`, r.URL.RawQuery)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "tok123").GetSSHKey(context.Background(), "1")
+	if !IsNotFound(err) || strings.Contains(err.Error(), "tok123") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestEndpointMustBeHTTPS(t *testing.T) {
+	_, err := New("http://api.example.com", "tok").ListSSHKeys(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCrossHostRedirectRefused(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("token followed redirect to other host: %s", r.URL.RawQuery)
+	}))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, strings.Replace(other.URL, "127.0.0.1", "localhost", 1)+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "tok123").ListSSHKeys(context.Background())
+	if err == nil || strings.Contains(err.Error(), "tok123") {
+		t.Fatalf("expected redacted redirect error, got %v", err)
+	}
+}
+
+func TestKeyMaterialAndFlatten(t *testing.T) {
+	if KeyMaterial("ssh-ed25519  AAAA me@host\n") != KeyMaterial("ssh-ed25519 AAAA") {
+		t.Fatal("key material should ignore comment/whitespace")
+	}
+	if _, ok := (Object{"_links": map[string]any{"self": "x"}, "a": "b"}).Flatten()["_links"]; ok {
+		t.Fatal("_links must be dropped")
 	}
 }

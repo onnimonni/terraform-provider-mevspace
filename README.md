@@ -13,9 +13,9 @@ Create an API token in [panel.mevspace.com](https://panel.mevspace.com) and set 
 | Name | Notes |
 |---|---|
 | `mevspace_ssh_key` | Full CRUD. `label` updates in place, `value` change recreates. Import by id. |
-| `mevspace_dedicated_server` | Adopts an **already ordered** server by `hostname`. Manages OS reinstall (`template_id`, `raid_value`, `startup_script_id`, `reinstall_triggers`) and `power_state` (`running`/`stopped`). Destroy only removes from state. Import by hostname. |
+| `mevspace_dedicated_server` | Adopts an **already ordered** server by `hostname`. Manages OS reinstall (`template_id`, `raid_value`, `startup_script_id`, `reinstall_triggers`, gated by `allow_reinstall`) and `power_state` (`running`/`stopped`). Destroy only removes from state. Import by hostname. |
 
-⚠️ Setting `template_id` on create, or changing any install field later, **reinstalls and wipes** the server.
+⚠️ Setting `template_id` on create, or changing any install field later, **reinstalls and wipes** the server. Such plans fail unless `allow_reinstall = true`.
 
 ## Data sources
 
@@ -65,7 +65,7 @@ provider_installation {
 }
 ```
 
-See `examples/`.
+See `examples/`. Regenerate registry docs (`docs/`) after schema changes with `gen-docs`.
 
 ## Releasing
 

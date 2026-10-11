@@ -6,9 +6,14 @@ import (
 	"github.com/onnimonni/terraform-provider-mevspace/internal/client"
 )
 
+const (
+	templateUsage      = "template list [--type dedicated|vps|vps_cloud]   (default: dedicated)"
+	startupScriptUsage = "startup-script list"
+)
+
 func handleTemplate(ctx context.Context, c *client.Client, a args) error {
 	if a.pos(1) != "list" {
-		return usageError("template list [--type dedicated|vps|vps_cloud]   (default: dedicated)")
+		return usageError(templateUsage)
 	}
 	typ := a.str("type")
 	if typ == "" {
@@ -23,7 +28,7 @@ func handleTemplate(ctx context.Context, c *client.Client, a args) error {
 
 func handleStartupScript(ctx context.Context, c *client.Client, a args) error {
 	if a.pos(1) != "list" {
-		return usageError("startup-script list")
+		return usageError(startupScriptUsage)
 	}
 	scripts, err := c.ListStartupScripts(ctx)
 	if err != nil {

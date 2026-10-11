@@ -9,15 +9,44 @@ import (
 )
 
 func TestParseArgs(t *testing.T) {
-	a := parseArgs([]string{"server", "reinstall", "--template", "Debian 13", "host1", "--yes", "--raid=1", "-h"})
+	a, err := parseArgs([]string{"server", "reinstall", "--template", "Debian 13", "host1", "--yes", "--raid=1", "-h"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a.pos(0) != "server" || a.pos(1) != "reinstall" || a.pos(2) != "host1" {
 		t.Fatalf("positional: %v", a.positional)
 	}
 	if a.str("template") != "Debian 13" || a.str("raid") != "1" || !a.bool("yes") || !a.bool("help") {
 		t.Fatalf("flags: %v", a.flags)
 	}
-	if _, err := a.need(1, "x"); err == nil {
-		t.Fatal("need should return usage when --help given")
+
+	// `--` ends options; "-" (stdin) is positional.
+	a, err = parseArgs([]string{"ssh-key", "rename", "7", "--", "--new-label"})
+	if err != nil || a.pos(3) != "--new-label" || len(a.flags) != 0 {
+		t.Fatalf("-- handling: %v %v %v", err, a.positional, a.flags)
+	}
+	if a, err = parseArgs([]string{"ssh-key", "create", "k", "-"}); err != nil || a.pos(3) != "-" {
+		t.Fatalf("stdin arg: %v %v", err, a.positional)
+	}
+
+	for _, bad := range [][]string{
+		{"server", "restart", "h", "--raid", "--help"}, // value flag must not swallow --help
+		{"server", "list", "--context"},                // missing value
+		{"server", "list", "--bogus"},                  // unknown flag
+		{"server", "list", "--json=false"},             // bool takes no value
+		{"server", "list", "-x"},
+	} {
+		if _, err := parseArgs(bad); err == nil {
+			t.Errorf("expected error for %v", bad)
+		}
+	}
+}
+
+func TestEveryCommandHasUsage(t *testing.T) {
+	for _, cmd := range []string{"server", "ssh-key", "template", "startup-script", "context"} {
+		if commandUsage[cmd] == "" {
+			t.Errorf("no usage for %s", cmd)
+		}
 	}
 }
 

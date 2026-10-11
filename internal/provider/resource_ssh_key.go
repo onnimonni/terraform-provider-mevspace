@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -49,9 +48,11 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Description: "Label of the key.",
 			},
 			"value": schema.StringAttribute{
-				Required:      true,
-				Description:   "Public key in OpenSSH format. Changing it recreates the key.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Required:    true,
+				Description: "Public key in OpenSSH format. Changing the key recreates it; whitespace/comment changes do not.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplaceIf(replaceIfKeyChanged,
+					"Replaced when the key changes; whitespace/comment changes update in place.",
+					"Replaced when the key changes; whitespace/comment changes update in place.")},
 			},
 		},
 	}
@@ -94,10 +95,10 @@ func (r *sshKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	if v, ok := key["label"]; ok {
 		state.Label = types.StringValue(client.Stringify(v))
 	}
-	// API may normalize whitespace; only take remote value when it really differs.
+	// API may normalize whitespace/comment; only take remote value when the key itself differs.
 	if v, ok := key["value"]; ok {
 		remote := client.Stringify(v)
-		if strings.TrimSpace(remote) != strings.TrimSpace(state.Value.ValueString()) {
+		if client.KeyMaterial(remote) != client.KeyMaterial(state.Value.ValueString()) {
 			state.Value = types.StringValue(remote)
 		}
 	}
@@ -130,4 +131,10 @@ func (r *sshKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 func (r *sshKeyResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// replaceIfKeyChanged forces replacement only when the key itself changes; whitespace or
+// comment differences (e.g. file("key.pub") with a trailing newline after import) update in place.
+func replaceIfKeyChanged(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	resp.RequiresReplace = client.KeyMaterial(req.PlanValue.ValueString()) != client.KeyMaterial(req.StateValue.ValueString())
 }

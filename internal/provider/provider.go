@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -55,6 +56,19 @@ func (p *mevspaceProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 func (p *mevspaceProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var cfg providerModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Unknown values (e.g. from another resource) must not silently fall back to the environment.
+	if cfg.APIToken.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("api_token"), "Unknown API token",
+			"api_token must be known at plan time; set it from a variable or MEVSPACE_API_TOKEN.")
+	}
+	if cfg.Endpoint.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("endpoint"), "Unknown endpoint",
+			"endpoint must be known at plan time.")
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}

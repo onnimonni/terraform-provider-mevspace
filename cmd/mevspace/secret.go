@@ -44,3 +44,11 @@ func deleteToken(c *Context) error {
 	}
 	return err
 }
+
+// tokenBackend describes where a context's token is stored.
+func tokenBackend(c *Context) string {
+	if c.Token != "" {
+		return "config file (plaintext)"
+	}
+	return secretBackend
+}

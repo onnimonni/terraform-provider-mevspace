@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -20,6 +22,7 @@ import (
 var (
 	_ resource.ResourceWithConfigure   = &dedicatedServerResource{}
 	_ resource.ResourceWithImportState = &dedicatedServerResource{}
+	_ resource.ResourceWithModifyPlan  = &dedicatedServerResource{}
 )
 
 type dedicatedServerResource struct {
@@ -34,6 +37,7 @@ type dedicatedServerModel struct {
 	StartupScriptID   types.Int64  `tfsdk:"startup_script_id"`
 	ReinstallTriggers types.Map    `tfsdk:"reinstall_triggers"`
 	PowerState        types.String `tfsdk:"power_state"`
+	AllowReinstall    types.Bool   `tfsdk:"allow_reinstall"`
 	Attributes        types.Map    `tfsdk:"attributes"`
 }
 
@@ -47,7 +51,8 @@ func (r *dedicatedServerResource) Schema(_ context.Context, _ resource.SchemaReq
 	resp.Schema = schema.Schema{
 		Description: "Manages an existing (already ordered) MEVSpace dedicated server: OS install and power state. " +
 			"The API cannot order or cancel servers, so destroying this resource only removes it from state. " +
-			"WARNING: setting or changing template_id, raid_value, startup_script_id or reinstall_triggers REINSTALLS the server and wipes its disks.",
+			"Setting or changing template_id, raid_value, startup_script_id or reinstall_triggers REINSTALLS the server and wipes its disks; " +
+			"plans that would do so fail unless allow_reinstall = true.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -65,16 +70,23 @@ func (r *dedicatedServerResource) Schema(_ context.Context, _ resource.SchemaReq
 			},
 			"raid_value": schema.StringAttribute{
 				Optional:    true,
-				Description: "RAID type used on reinstall.",
+				Description: "RAID type used on reinstall. Requires template_id.",
+				Validators:  []validator.String{stringvalidator.AlsoRequires(path.MatchRoot("template_id"))},
 			},
 			"startup_script_id": schema.Int64Attribute{
 				Optional:    true,
-				Description: "Startup script id (see mevspace_startup_scripts) run after reinstall.",
+				Description: "Startup script id (see mevspace_startup_scripts) run after reinstall. Requires template_id.",
+				Validators:  []validator.Int64{int64validator.AlsoRequires(path.MatchRoot("template_id"))},
 			},
 			"reinstall_triggers": schema.MapAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Arbitrary values; any change triggers a reinstall (requires template_id).",
+				Description: "Arbitrary values; any change triggers a reinstall. Requires template_id.",
+				Validators:  []validator.Map{mapvalidator.AlsoRequires(path.MatchRoot("template_id"))},
+			},
+			"allow_reinstall": schema.BoolAttribute{
+				Optional:    true,
+				Description: "Must be true for any plan that reinstalls (wipes) the server. Defaults to false.",
 			},
 			"power_state": schema.StringAttribute{
 				Optional:    true,
@@ -103,8 +115,11 @@ func (r *dedicatedServerResource) Create(ctx context.Context, req resource.Creat
 	}
 	hostname := plan.Hostname.ValueString()
 
-	if _, err := r.client.GetDedicated(ctx, hostname); err != nil {
+	if _, err := r.client.GetDedicated(ctx, hostname); client.IsNotFound(err) {
 		resp.Diagnostics.AddError("Dedicated server not found", "Servers must be ordered in the MEVSpace panel first: "+err.Error())
+		return
+	} else if err != nil {
+		resp.Diagnostics.AddError("Reading dedicated server failed", err.Error())
 		return
 	}
 	if !plan.TemplateID.IsNull() {
@@ -112,14 +127,16 @@ func (r *dedicatedServerResource) Create(ctx context.Context, req resource.Creat
 			return
 		}
 	}
+	plan.ID = plan.Hostname
 	if !plan.PowerState.IsNull() {
 		if err := r.client.PowerDedicated(ctx, hostname, powerAction(plan.PowerState.ValueString())); err != nil {
-			resp.Diagnostics.AddError("Setting power state failed", err.Error())
-			return
+			// Keep the resource (an error would taint it and re-run the reinstall);
+			// leaving power_state null makes the next apply retry only the power action.
+			resp.Diagnostics.AddWarning("Setting power state failed, will retry on next apply", err.Error())
+			plan.PowerState = types.StringNull()
 		}
 	}
 
-	plan.ID = plan.Hostname
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -152,25 +169,79 @@ func (r *dedicatedServerResource) Update(ctx context.Context, req resource.Updat
 		return
 	}
 
-	installChanged := !plan.TemplateID.Equal(state.TemplateID) ||
-		!plan.RaidValue.Equal(state.RaidValue) ||
-		!plan.StartupScriptID.Equal(state.StartupScriptID) ||
-		!plan.ReinstallTriggers.Equal(state.ReinstallTriggers)
-	if installChanged && !plan.TemplateID.IsNull() {
+	if wouldReinstall(&plan, &state) {
 		if !r.reinstall(ctx, plan, &resp.Diagnostics) {
 			return
 		}
 	}
+	plan.ID = plan.Hostname
 	if !plan.PowerState.IsNull() && !plan.PowerState.Equal(state.PowerState) {
 		if err := r.client.PowerDedicated(ctx, plan.Hostname.ValueString(), powerAction(plan.PowerState.ValueString())); err != nil {
 			resp.Diagnostics.AddError("Setting power state failed", err.Error())
+			// Persist the completed reinstall so a retry does not wipe the server again.
+			plan.PowerState = state.PowerState
+			resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 			return
 		}
 	}
 
 	// attributes keeps its planned (prior state) value; next refresh updates it.
-	plan.ID = plan.Hostname
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+}
+
+// ModifyPlan refuses any plan that would reinstall (wipe) the server unless allow_reinstall = true.
+func (r *dedicatedServerResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan dedicatedServerModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	var prior *dedicatedServerModel
+	if !req.State.Raw.IsNull() {
+		prior = &dedicatedServerModel{}
+		resp.Diagnostics.Append(req.State.Get(ctx, prior)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	if !wouldReinstall(&plan, prior) {
+		return
+	}
+	host := plan.Hostname.ValueString()
+	if !plan.AllowReinstall.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("template_id"), "Reinstall not allowed",
+			"This plan would reinstall "+host+" and WIPE ALL ITS DATA. Set allow_reinstall = true to permit it.")
+		return
+	}
+	resp.Diagnostics.AddAttributeWarning(path.Root("template_id"), "Server will be reinstalled",
+		"Applying this plan reinstalls "+host+" and wipes all its data.")
+}
+
+// wouldReinstall reports whether applying plan over prior (nil on create) triggers a reinstall.
+// Unknown values count as changes, so the check is conservative.
+func wouldReinstall(plan, prior *dedicatedServerModel) bool {
+	if plan.TemplateID.IsNull() {
+		return false
+	}
+	if prior == nil {
+		return true
+	}
+	return !plan.TemplateID.Equal(prior.TemplateID) ||
+		!plan.RaidValue.Equal(prior.RaidValue) ||
+		!plan.StartupScriptID.Equal(prior.StartupScriptID) ||
+		!mapsEqual(plan.ReinstallTriggers, prior.ReinstallTriggers)
+}
+
+// mapsEqual treats null and empty maps as equal, so removing `reinstall_triggers = {}` is no reinstall.
+func mapsEqual(a, b types.Map) bool {
+	empty := func(m types.Map) bool { return m.IsNull() || (!m.IsUnknown() && len(m.Elements()) == 0) }
+	if empty(a) && empty(b) {
+		return true
+	}
+	return a.Equal(b)
 }
 
 func (r *dedicatedServerResource) Delete(ctx context.Context, _ resource.DeleteRequest, resp *resource.DeleteResponse) {
