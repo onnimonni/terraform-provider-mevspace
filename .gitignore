@@ -1,0 +1,14 @@
+.devenv*
+devenv.local.nix
+.direnv
+.pre-commit-config.yaml
+/terraform-provider-mevspace
+/mevspace
+dist/
+*.tfstate*
+.terraform*
+secrets.enc.env
+.sops.yaml
+.playwright-mcp/
+# private notes, not part of the provider
+SECURITY.md

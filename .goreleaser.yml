@@ -1,0 +1,49 @@
+version: 2
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: provider
+    env: [CGO_ENABLED=0]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64]
+    binary: "{{ .ProjectName }}_v{{ .Version }}"
+  - id: cli
+    main: ./cmd/mevspace
+    env: [CGO_ENABLED=0]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    binary: mevspace
+archives:
+  - id: provider-archives
+    ids: [provider]
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: cli-archives
+    ids: [cli]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "mevspace-{{ .Os }}-{{ .Arch }}"
+checksum:
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+signs:
+  - artifacts: checksum
+    args: ["--batch", "--local-user", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}"]
+release:
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
+changelog:
+  disable: true
