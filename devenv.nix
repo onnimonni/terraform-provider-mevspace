@@ -8,6 +8,7 @@
     pkgs.goreleaser
     pkgs.sops
     pkgs.age
+    pkgs.gnupg
   ];
 
   languages.go.enable = true;
